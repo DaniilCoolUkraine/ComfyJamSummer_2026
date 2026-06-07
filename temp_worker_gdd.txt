@@ -1,0 +1,657 @@
+# TEMP WORKER
+### Game Design Document — Jam Build
+**Jam:** 2-week jam | ~10h realistic scope  
+**Theme:** Summer  
+**Limitation:** The Instructions Are a Lie  
+**Platform:** Unity / WebGL  
+**Version:** 1.0
+
+---
+
+## Table of Contents
+1. [Overview](#1-overview)
+2. [Design Pillars](#2-design-pillars)
+3. [Session Arc](#3-session-arc)
+4. [Core Systems](#4-core-systems)
+   - 4.1 Heat System
+   - 4.2 Station System
+   - 4.3 Package Flow
+   - 4.4 Player System
+   - 4.5 Error Terminal (The Lie)
+   - 4.6 Manager Visits & AC
+   - 4.7 Quota & Shift Timer
+5. [Station Catalogue](#5-station-catalogue)
+6. [The Lie — Discovery Design](#6-the-lie--discovery-design)
+7. [Warehouse Layout](#7-warehouse-layout)
+8. [UI & HUD](#8-ui--hud)
+9. [Audio Design](#9-audio-design)
+10. [Visual Design](#10-visual-design)
+11. [Win & Lose Conditions](#11-win--lose-conditions)
+12. [Out of Scope (Jam Cut List)](#12-out-of-scope-jam-cut-list)
+13. [Implementation Order](#13-implementation-order)
+
+---
+
+## 1. Overview
+
+You're a teenager on your first day at a summer warehouse job. The place runs on six automated systems — scanners, conveyors, drones, the works. Your job is basically to supervise.
+
+Except the warehouse is not air-conditioned. The automated systems generate heat. You generate heat. As temperature rises, systems degrade and break — one by one, in a predictable order. When a station breaks, *you* replace it manually. Manual labor generates more heat. The warehouse gets hotter. More systems fail.
+
+When something breaks, the error terminal on the wall tells you exactly how to fix it.
+
+The terminal is lying.
+
+---
+
+## 2. Design Pillars
+
+### 1. Triage, Not Efficiency
+The player can never fix everything. The core question is never "how do I work faster" — it's "what do I sacrifice right now." Players who try to be maximally efficient generate maximum heat and accelerate their own collapse. The winning strategy is **strategic negligence**: letting low-value tasks slip to protect high-value systems.
+
+### 2. The Collapse Feels Earned
+The session should follow a clear emotional arc: luxury → first crack → juggling → triage → race. The early automation fantasy makes the late-game chaos land harder. Players should feel the shift, not just observe it.
+
+### 3. The Lie Rewards Observation
+The terminal's wrongness is consistent and discoverable. Players who test, notice the pattern, and invert it get a genuine "aha" moment that improves their run. The lie should never feel arbitrary — it should feel like a system someone actually designed badly.
+
+### 4. The Manager Is a Lifeline
+The manager visit is a *net positive*. They bring AC. The frustration of being checked on is offset by the breathing room the AC provides. The visit should feel like a mixed blessing, not a punishment.
+
+---
+
+## 3. Session Arc
+
+One session = one 12-minute shift. No days, no runs between sessions — just a single continuous arc.
+
+| Timestamp | What's Happening | Player Feeling |
+|-----------|-----------------|----------------|
+| 0:00–1:30 | Full automation. Player barely needs to act. | *Luxury. This job is easy.* |
+| 1:30–3:00 | First station degrades. One small manual task added. | *Fine. Manageable.* |
+| 3:00–4:30 | Terminal consulted for first time. Fix works (one true code). | *Okay, I know how this works.* |
+| 4:30–6:00 | Two more stations degrade. Terminal gives wrong fix. Adjacent penalty fires. | *That's weird. Did I do that wrong?* |
+| 5:00 ± 60s | **Manager Visit 1.** Lie tip + AC enabled (90s). | *Relief. Back in control.* |
+| 6:00–8:00 | AC window expires. Cascade resumes. Two stations now broken. | *Juggling. Getting busy.* |
+| 7:00–8:30 | Terminal used again — same wrong result. Pattern suspicious. | *Wait. The terminal is the problem.* |
+| 9:00 ± 60s | **Manager Visit 2.** Lie tip + AC enabled (90s). | *Breather. Catching up on quota.* |
+| 9:00–11:00 | AC expires. Final cascade. Both drones likely gone. | *Controlled panic.* |
+| 11:00–12:00 | Terminal pattern likely decoded. Race to quota. | *I understand the system now. Can I still win?* |
+| 12:00 | Shift bell. Win / partial / fail. | — |
+
+---
+
+## 4. Core Systems
+
+---
+
+### 4.1 Heat System
+
+**Type:** Single global float, 0–100. Represents ambient warehouse temperature.
+
+#### Heat Sources (all additive, per second)
+
+| Source | Heat/s |
+|--------|--------|
+| Baseline (machines running, summer day) | +1.0 |
+| Each station in BROKEN state | see Station Catalogue |
+| Player idle / standing | +0.2 |
+| Player walking | +0.5 |
+| Player carrying a light package | +1.5 |
+| Player carrying a heavy package | +3.5 |
+
+#### Heat Sinks (all subtractive, per second)
+
+| Sink | Heat/s | Condition |
+|------|--------|-----------|
+| Passive warehouse cooling | -1.0 | Always active |
+| AC unit (active) | -8.0 | Only while AC is ON |
+
+**Net heat at game start (no manual work, no broken stations):** +1.0 − 1.0 = **0.0 net.** Temperature is stable until the player starts working and stations start degrading. This is intentional — the opening fantasy holds.
+
+#### Heat Thresholds (per station — see Section 5 for full catalogue)
+Each station has two personal thresholds:
+- **Degrade Threshold** — station transitions from WORKING to DEGRADED (half-speed, reduced output)
+- **Break Threshold** — station transitions from DEGRADED to BROKEN (offline, emitting heat, requires manual replacement)
+
+Temperature never resets between states. Once a threshold is crossed, the station state change is permanent until repaired.
+
+#### Heat Ceiling
+At **100**, a total shutdown cascade fires: all remaining WORKING and DEGRADED stations flip to BROKEN simultaneously. This is the hard fail condition. See Section 11.
+
+---
+
+### 4.2 Station System
+
+Each station is an independent state machine with four states:
+
+```
+WORKING → DEGRADED → BROKEN → REPAIRED (back to WORKING)
+```
+
+| State | Visual | Behavior | Heat Contribution |
+|-------|--------|----------|-------------------|
+| WORKING | Blue glow | Full speed, no player intervention needed | None |
+| DEGRADED | Yellow/Orange | Half throughput. Station still processes but slowly. Packages back up. | None |
+| BROKEN | Red, sparking | Station offline. Packages stop. Player must manually handle its task. Emits heat. | See catalogue |
+| REPAIRED | Blue (fading in) | Fully restored. Heat contribution stops immediately. | None |
+
+**State transitions:**
+- WORKING → DEGRADED: global temperature crosses station's Degrade Threshold
+- DEGRADED → BROKEN: global temperature crosses station's Break Threshold
+- BROKEN → REPAIRED: player completes the correct repair sequence at the station (not via terminal — via the interaction panel on the station itself, using real timing)
+
+**Repair interaction (on the station, not the terminal):**
+Each station has a small interaction panel. Player approaches, holds [Interact]. A progress bar fills. Station repairs. The terminal tells players the wrong duration for this hold — the real duration is always **2× the terminal's stated time.**
+
+---
+
+### 4.3 Package Flow
+
+Packages travel a fixed path through the warehouse from Intake to Dock.
+
+```
+[Intake] → [Scanner] → [Conveyor] → [Sorter] → [Drone Zone] → [Dock Feeder] → [TRUCK]
+```
+
+**Package types:**
+
+| Type | Weight | Manual carry speed | Manual carry heat/s |
+|------|--------|--------------------|---------------------|
+| Light | Standard | 100% | +1.5 |
+| Heavy | 2× | 50% | +3.5 |
+
+Heavy packages normally require a functioning drone to move at full speed. When both drones are BROKEN, heavy packages must be carried manually — slow, hot, and quota-draining.
+
+**Package spawn rate:** 1 package every 8 seconds at intake. Fixed rate, no scaling. This gives a baseline of ~7–8 packages/minute when fully automated, dropping to 2–3 packages/minute when 3+ stations are BROKEN.
+
+**Quota target:** 50 packages shipped to truck within 12 minutes. See Section 11 for partial win thresholds.
+
+**Packages that are not carried/processed:** They pile up at the station they're blocked at. A backlog of 10+ packages at any one station triggers a visual/audio cue ("overloaded pile"). Backlog does not generate additional heat — it's a quota problem, not a temperature problem.
+
+---
+
+### 4.4 Player System
+
+The player is a top-down character moving through the warehouse.
+
+**Movement:** Standard 4-directional or free movement. No running — the player's heat contribution scales only with activity (carrying vs. walking), not speed. This keeps the "slow down to cool down" incentive clean.
+
+**Interaction:** Single context-sensitive [Interact] button / key.
+- Near a package: pick up / put down
+- Near a BROKEN station's panel: begin repair (hold)
+- Near the Error Terminal: read current diagnostic code
+- Near the AC switch (wall-mounted): not interactive for player — manager only
+
+**Stamina:** No explicit stamina bar for jam scope. Heat generation from the player IS the stamina system — it's just expressed globally rather than personally. This removes one meter from the HUD and keeps the global temperature as the single resource to watch.
+
+---
+
+### 4.5 Error Terminal (The Lie)
+
+A wall-mounted terminal in the center-north of the warehouse. Slightly off the main package flow — using it always costs the player meaningful movement time.
+
+**Behavior:** When any station is DEGRADED or BROKEN, the terminal displays a diagnostic code for it. The code always contains:
+- Station name
+- Described malfunction
+- Recommended repair sequence with a stated hold duration
+
+**The Lie — single consistent rule:**
+> *All recommended hold durations on the terminal are exactly half the real required duration.*
+
+This is the only lie. Everything else about the terminal (station name, malfunction description, repair sequence steps) is accurate. The fix is almost right. Just too short.
+
+**Consequence of following terminal instructions (half-duration repair):**
+- Station returns to DEGRADED (not fully repaired — feels like partial progress)
+- The station directly downstream in the package flow drops one state (WORKING → DEGRADED, or DEGRADED → BROKEN)
+- Net result: you spent 20 seconds at the terminal, partially fixed one station, and damaged another
+
+**Why this consequence shape:**
+- First time: looks like a coincidence. "That station was probably already going."
+- Second time: suspicious. Same downstream penalty.
+- Third time: pattern confirmed. The terminal's advice is consistently making the downstream station worse.
+
+**Terminal codes — examples:**
+
+> `ERR_014 CONVEYOR_BELT: Motor thermal lockout detected. Recommended action: Open panel, hold reset switch for 6 seconds, release. Estimated downtime: 25 seconds.`
+> *(Real fix: hold for 12 seconds)*
+
+> `ERR_031 DRONE_UNIT_1: Rotor governor fault. Recommended action: Hold restart sequence for 4 seconds until indicator light changes. Estimated downtime: 20 seconds.`
+> *(Real fix: hold for 8 seconds)*
+
+**The first terminal interaction is a freebie:**
+The intake scanner (station 1) has one correct code. When the scanner first degrades (~2:30 into the shift), the terminal gives the right duration. This builds trust before the betrayal.
+
+---
+
+### 4.6 Manager Visits & AC
+
+**AC Unit:** Wall-mounted on the west wall, visually prominent. Has a physical switch and a visible ON/OFF indicator panel. Player *cannot* interact with it. Manager only.
+
+**Manager visits:** Exactly 2 per shift, at semi-randomized times:
+- Visit 1: between 4:30 and 5:30
+- Visit 2: between 8:30 and 9:30
+
+Randomization is ±30 seconds within each window to prevent memorization of exact timing.
+
+**Visit sequence (same both times):**
+
+1. Manager enters from dock side. Audio cue: footsteps, door.
+2. Small dialogue bubble appears above manager (diegetic, no UI popup):
+   - Visit 1 example: *"Hot in here. Let me get the AC. Oh — and remember, always trust the terminal. It's calibrated for this exact warehouse."*
+   - Visit 2 example: *"Still running hot. Hitting AC again. Keep following the terminal protocols — that's what they're for."*
+3. Manager walks to AC switch, flips it ON.
+4. AC activates: -8 heat/s for **90 seconds.**
+5. Manager exits. AC continues running.
+6. After 90 seconds, AC switches OFF automatically. Visual indicator goes dark. Audio cue: unit spinning down.
+
+**Design intent:**
+- Manager dialogue reinforces the terminal's authority — doubling down on the lie at the exact moment players might be questioning it
+- AC timing is designed to arrive when the cascade is accelerating, providing a genuine pause
+- 90 seconds at -8 heat/s can drop temperature by up to 720 units — but only if the player also stops generating heat during that window (stops manual labor = can't ship packages). Another triage decision
+- The manager's advice is always the wrong advice. The AC is always real help. The person is unreliable; the hardware works fine
+
+**AC does not repair broken stations.** It only prevents further degradation. Stations already BROKEN remain BROKEN after AC runs. Players must still manually repair or absorb.
+
+---
+
+### 4.7 Quota & Shift Timer
+
+**Shift duration:** 12 minutes (720 seconds). Countdown displayed on HUD.
+
+**Quota:** 50 packages delivered to truck.
+
+**Quota display:** Shows current count / 50. No "pace indicator" or suggested rate — players must judge their own throughput. This is intentional friction.
+
+**End of shift:** Timer hits 0. Shift bell sounds. Results screen shows packages shipped. See Section 11 for outcome thresholds.
+
+---
+
+## 5. Station Catalogue
+
+Six stations total. Listed in cascade order (lowest degrade threshold to highest).
+
+---
+
+### Station 1 — Intake Scanner
+**Position:** Far left. First point of contact for all incoming packages.  
+**Function (automated):** Reads each package, assigns routing tag.  
+**Function (manual):** Player stands at scanner, presses [Interact] on each passing package to manually tag it. One interaction per package, ~1 second each.  
+**Degrade Threshold:** 38  
+**Break Threshold:** 52  
+**Broken Heat/s:** +1.0  
+**Notes:** First station to degrade but lowest heat output when broken. Manageable manually. Terminal's one *true* fix code is for this station — used to build early trust.
+
+---
+
+### Station 2 — Conveyor Belt
+**Position:** Center corridor, running east-west.  
+**Function (automated):** Moves all packages along the main corridor.  
+**Function (manual):** Player carries packages from scanner end to sorter end. ~4 seconds per light package, ~8 seconds per heavy.  
+**Degrade Threshold:** 45  
+**Break Threshold:** 63  
+**Broken Heat/s:** +2.5  
+**Notes:** The first station whose manual replacement is genuinely disruptive. Backlog builds fast when this is gone. Downstream stations starve if player falls behind here.
+
+---
+
+### Station 3 — Sorter
+**Position:** Center-right junction. Three output lanes (Zone A, B, C).  
+**Function (automated):** Routes packages to correct zone based on tag.  
+**Function (manual):** Package arrives at sorter, player must read the tag (icon on package) and push it to the correct lane. One interaction + one directional input per package.  
+**Degrade Threshold:** 42  
+**Break Threshold:** 58  
+**Broken Heat/s:** +1.5  
+**Notes:** Sorter degrades early. Manual sorting adds a cognitive load on top of carrying — this is the station that starts making the player feel busy even when temperature is still manageable. Mis-sorts send a package to the wrong zone, but it can be redirected (costs time, not quota).
+
+---
+
+### Station 4 — Drone Unit 1
+**Position:** Drone Zone, north bay.  
+**Function (automated):** Lifts heavy packages, carries them over the conveyor junction to the dock side.  
+**Function (manual):** Player must carry heavy packages themselves. 50% movement speed, +3.5 heat/s.  
+**Degrade Threshold:** 50  
+**Break Threshold:** 68  
+**Broken Heat/s:** +4.0  
+**Notes:** First drone loss is a major escalation point. Heavy packages now bottleneck the entire system. Drone units have the highest heat output when broken — they are the most critical stations to protect. Players should learn this by feel.
+
+---
+
+### Station 5 — Drone Unit 2
+**Position:** Drone Zone, south bay.  
+**Function (automated):** Same as Drone 1. Handles overflow and parallel heavy loads.  
+**Function (manual):** Same as Drone 1.  
+**Degrade Threshold:** 55  
+**Break Threshold:** 72  
+**Broken Heat/s:** +4.0  
+**Notes:** Slightly higher thresholds than Drone 1. When both drones are gone, heavy packages effectively stall. This is the intended late-game crisis state. The player's only option is slow manual carries generating huge heat — or abandoning heavy packages entirely (quota hit, but temperatures stay lower). This is the central triage decision of the late game.
+
+---
+
+### Station 6 — Dock Feeder
+**Position:** Far right. Final station before the truck.  
+**Function (automated):** Feeds processed packages from the dock staging area into the truck.  
+**Function (manual):** Player carries packages the final stretch to the truck's open dock door.  
+**Degrade Threshold:** 60  
+**Break Threshold:** 78  
+**Broken Heat/s:** +2.0  
+**Notes:** Highest degrade/break thresholds — it survives longest. A small mercy. When it does break, the player is already managing 4–5 failed stations and this is a final straw. Short carry distance keeps manual handling bearable.
+
+---
+
+### Heat Threshold Reference Table
+
+| Station | Degrade | Break | Broken Heat/s |
+|---------|---------|-------|---------------|
+| Intake Scanner | 38 | 52 | +1.0 |
+| Sorter | 42 | 58 | +1.5 |
+| Conveyor Belt | 45 | 63 | +2.5 |
+| Drone Unit 1 | 50 | 68 | +4.0 |
+| Drone Unit 2 | 55 | 72 | +4.0 |
+| Dock Feeder | 60 | 78 | +2.0 |
+
+---
+
+## 6. The Lie — Discovery Design
+
+The lie is a single consistent rule embedded in the terminal's output. It is never explained. The player discovers it through play.
+
+### The Rule
+> All recommended hold durations in terminal repair codes are exactly half the real required duration.
+
+### Discovery Pacing
+
+**~2:30 — First interaction (True code)**  
+The Intake Scanner degrades. Terminal gives the correct fix (this is the one exception — a planted true code to build trust). Player repairs successfully in one attempt. Terminal feels reliable.
+
+**~4:30 — First betrayal**  
+A second station breaks. Terminal gives a half-duration code. Player follows it exactly. Station returns to DEGRADED (partial — feels like progress, but not full repair). The downstream station drops one state. Player likely notices the downstream penalty but attributes it to the rising temperature, not the terminal.
+
+**~6:30 — Second betrayal**  
+Player tries the terminal again (either the same station or a new one). Same partial result. Same downstream penalty. Now the pattern is undeniable — the terminal consistently causes a second station to worsen. The manager's dialogue ("always trust the terminal") lands as suspicious in hindsight.
+
+**~7:30–9:00 — Hypothesis window**  
+Player has the tools to test: try holding twice as long on the next repair. If they do: station fully repairs, no downstream penalty. Pattern confirmed. The terminal is usable again — but only if you ignore its stated duration.
+
+**~9:00–12:00 — Informed play**  
+Player who discovered the truth can now repair strategically during the second AC window. This is the skill payoff: a player who cracked the lie gets a real mechanical advantage in the final stretch.
+
+### Why This Works
+- The lie is **specific** (timing, not method) — players have a concrete thing to test
+- The consequence is **consistent** (always downstream, always partial) — players can recognize a pattern
+- The fix is **learnable** (double the time) — feels like solving something, not guessing
+- The manager **reinforces the lie verbally** — authority figure backing wrong behavior mirrors real-world workplace dynamics and adds thematic weight
+
+### The Lie in Context (All Layers)
+
+| Source | The Lie | Where |
+|--------|---------|-------|
+| Morning briefing text | "Drone systems are self-regulating. Your physical activity has no impact on climate control." | Pre-shift screen |
+| Training poster (wall decor) | "Speed is safety. Never slow down during peak hours." | Warehouse north wall |
+| Error terminal | Half-duration repair codes | Interactive, center wall |
+| Manager Visit 1 | "Always trust the terminal — it's calibrated for this exact warehouse." | Dialogue bubble |
+| Manager Visit 2 | "Keep following the terminal protocols. That's what they're there for." | Dialogue bubble |
+
+---
+
+## 7. Warehouse Layout
+
+```
+╔═══════════════════════════════════════════════════════╗
+║  [TRAINING POSTER]      [ERROR TERMINAL]              ║
+║                                                       ║
+║  [INTAKE]──[SCANNER]──[CONVEYOR]──[SORTER]            ║
+║                                    │  │  │            ║
+║                                  [A][B][C]            ║
+║                                    └──┴──┘            ║
+║                               [DRONE 1][DRONE 2]      ║
+║                                    └──────┘           ║
+║  [AC SWITCH]                   [DOCK FEEDER]──[TRUCK] ║
+╚═══════════════════════════════════════════════════════╝
+```
+
+**Key spatial decisions:**
+- Error Terminal is off the main package flow (north wall, center). Using it means abandoning the line. This is the cost of trusting the terminal.
+- AC Switch is on the west wall, visible but player-inaccessible. Serves as a reminder that the solution exists and is being withheld.
+- Drone Zone sits between Sorter and Dock Feeder — it is the choke point. When both drones fail, everything queues here.
+- Three sorter output lanes (A, B, C) fan out slightly before reconverging at the drone zone. Small spatial wrinkle that makes manual sorting feel physical.
+
+**Player spawn:** Left side, near Intake.  
+**Manager entry/exit point:** Right side, dock door.
+
+---
+
+## 8. UI & HUD
+
+Minimal. One screen layer only — no pause menu, no options screen for jam build.
+
+### HUD Elements
+
+**Temperature Gauge**  
+- Position: Top center
+- Visual: Vertical thermometer, 0–100. Starts cool blue, graduates to orange, then red above 75.
+- Shows station threshold tick marks at 38, 42, 45, 50, 55, 60 (faint lines indicating when next station will degrade)
+- Does NOT label which station corresponds to which tick — players must infer this
+
+**Quota Counter**  
+- Position: Top right
+- Format: `[current] / 50 packages`
+- No pace indicator
+
+**Shift Timer**  
+- Position: Top left
+- Format: `MM:SS` countdown from 12:00
+- Turns red below 2:00
+
+**Station Status Bar**  
+- Position: Bottom center
+- Six icons, one per station, left-to-right in cascade order
+- Each icon: small machine silhouette, colored by state (Blue / Orange / Red)
+- No labels — visual literacy develops through play
+
+**AC Indicator**  
+- Position: Top center, below temperature gauge
+- Simple: snowflake icon, visible only when AC is ON. Pulses gently. Disappears when AC shuts off.
+
+**No tutorial popups. No tooltips. No objectives panel.**  
+The morning briefing screen covers setup. Everything else the player learns through play.
+
+### Morning Briefing Screen
+
+Full-screen text card, auto-dismissed after 8 seconds (or on any keypress). Styled as a printed employee onboarding sheet.
+
+```
+SUNRIDGE DISTRIBUTION — SUMMER SHIFT ONBOARDING
+
+Welcome to your first day. Today's quota: 50 packages.
+Your shift runs 12 minutes. The automation handles everything.
+
+A few tips from your supervisor:
+- Speed is safety. Never slow down during peak hours.
+- Drone systems are self-regulating. Your physical activity
+  has no impact on climate control.
+- In the unlikely event of equipment issues, consult the
+  Error Terminal. It is calibrated for this exact warehouse.
+- Management may check in during your shift. This is routine.
+
+Good luck. You've got this.
+```
+
+---
+
+## 9. Audio Design
+
+Scope-appropriate. All audio is functional first, atmospheric second.
+
+| Moment | Sound |
+|--------|-------|
+| Shift start | HVAC hum, conveyor belt whir, distant drone buzz — layered ambient loop |
+| Station DEGRADED | Subtle pitch shift on that station's ambient layer (conveyor slows, drone stutters) |
+| Station BROKEN | Hard cut of that station's audio layer + spark/clunk one-shot |
+| Manual carry (light) | Footstep rhythm slightly heavier |
+| Manual carry (heavy) | Strained footstep, subtle effort breath |
+| Terminal interaction | Keyboard typing SFX, printer-style readout beep |
+| Manager entry | Door, footsteps, slightly reverbed voice (text-only dialogue — no VO needed) |
+| AC on | Click, then rush of cold air — satisfying, distinct |
+| AC off | Unit spinning down, subtle sigh |
+| Temperature critical (85+) | Low warning hum under all audio |
+| Shift bell | Classic factory bell one-shot |
+| Total shutdown | All ambient audio cuts simultaneously, silence, then fail sound |
+
+---
+
+## 10. Visual Design
+
+### Palette
+
+| State | Color |
+|-------|-------|
+| Working station | `#4AB7FF` — cool blue |
+| Degraded station | `#FFA830` — amber |
+| Broken station | `#FF3B30` — hot red, flickering |
+| Repaired station | Blue fading in over 2s |
+| Screen temperature overlay | Transparent warm tint, opacity 0–0.35 as temp goes 60→100 |
+| AC active | Faint cool blue desaturation over scene |
+
+### Warehouse Feel
+- Flat / slightly stylized industrial look. No photo-realism.
+- Summer light through skylights (top of screen) — warm, high contrast.
+- Cardboard boxes, metal shelving, painted floor lanes.
+- Visual clutter increases as backlog builds (boxes stacking at broken stations).
+
+### Station Visual States
+Each station should be immediately readable from across the warehouse:
+- WORKING: steady blue indicator light + smooth animation loop
+- DEGRADED: amber light, animation stuttering/slower
+- BROKEN: red light, sparks particle effect, animation stopped, heat shimmer above unit
+
+### Temperature Screen Overlay
+Above ~65 temperature: a very subtle warm color tint washes over the scene. Reaches maximum opacity (~35% warm overlay) at 90+. Not annoying at low levels, genuinely oppressive at high levels. Players should *feel* the heat visually.
+
+---
+
+## 11. Win & Lose Conditions
+
+### Win (Full)
+Shift timer reaches 0:00 with **50+ packages** delivered to truck.  
+Result screen: shift complete, packages count, heat peak stat.
+
+### Win (Partial)
+Shift timer reaches 0:00 with **35–49 packages**.  
+Result screen acknowledges falling short. "Your manager was not impressed" — but includes the AC quote from their visit for irony.
+
+### Lose (Quota)
+Shift timer reaches 0:00 with **< 35 packages**.  
+Result screen: quota failed.
+
+### Lose (Thermal Shutdown)
+Global temperature reaches **100** before the shift ends.  
+All remaining stations flip to BROKEN simultaneously. Packages scatter. The warehouse PA system says something helpful (*"Please consult the error terminal for resolution."*).  
+Result screen: shift ended early due to thermal event.
+
+### Retry
+Single button on result screen. Returns to morning briefing. Session is fully repeatable — the lie is always the same rule, but the player knows it now. Second runs are faster and more confident. That progression feeling is the replayability.
+
+---
+
+## 12. Out of Scope (Jam Cut List)
+
+These are good ideas. Cut them anyway.
+
+| Feature | Why cut |
+|---------|---------|
+| Spatial heat grid (heat zones per cell) | 2–3× build time for this one system alone |
+| Multiple days / shift progression | Session arc is complete as a single run |
+| Sealing Arm station | Six stations covers all manual task types — seventh adds time, not design value |
+| Player stamina bar | Global heat IS the stamina — duplicate meter |
+| Procedural terminal codes | 12 handcrafted codes is enough and more controllable |
+| Running / sprint | Simplifies heat contribution logic, one less input |
+| Leaderboard | Scope, scope, scope |
+| Mobile controls | WebGL / desktop first |
+
+---
+
+## 13. Implementation Order
+
+Build in this sequence. Each phase produces something playable.
+
+---
+
+### Phase 1 — Skeleton (Target: ~2.5h)
+*Goal: Packages travel from intake to truck. Nothing breaks yet.*
+
+1. Warehouse scene — static layout, 6 station positions, intake spawn point, truck dock
+2. Package object — spawn at intake (timed), travel path data, light/heavy type flag
+3. Player controller — top-down movement, single [Interact] input
+4. Pick up / put down — player carries package, package follows player, deposit at dock = quota +1
+5. Global heat float — updates every frame (sources + sinks), no threshold logic yet
+6. HUD skeleton — temperature gauge, quota counter, shift timer (all reading live values)
+
+**Milestone:** Player can manually carry packages to the truck. Temperature rises as they work. Timer counts down. Quota increments.
+
+---
+
+### Phase 2 — Station State Machine (Target: ~2h)
+*Goal: Stations degrade and break on temperature cues. Manual tasks work.*
+
+7. Station state machine — WORKING / DEGRADED / BROKEN per station, threshold checks against global heat
+8. Station visual states — color coding, particle effect on BROKEN
+9. Station heat contribution — each BROKEN station adds its heat/s to global heat
+10. Automated package handling — when station is WORKING or DEGRADED, packages move through automatically (conveyor tween, drone lift anim)
+11. Manual task per station — when BROKEN, player interaction replaces automation (tag, carry segment, route decision, etc.)
+12. Station status bar (HUD) — six icons, state-driven color
+
+**Milestone:** Cascade happens. Player watches automation fail. Can manually replace broken stations. Game is now playable end-to-end, rough.
+
+---
+
+### Phase 3 — The Lie (Target: ~1.5h)
+*Goal: Error terminal exists, gives wrong codes, has discoverable repair interaction on stations.*
+
+13. Repair interaction on stations — hold [Interact] at station panel, progress bar, completes at real duration
+14. Error terminal UI — wall panel, displays current diagnostic code for each broken/degraded station, hardcoded lookup table (12 codes)
+15. Wrong fix consequence — if player holds for only the terminal-stated duration: partial repair + downstream station drops one state
+16. Correct fix reward — if player holds for real duration: full repair, no downstream penalty
+17. One true code — intake scanner code is correct (no downstream penalty, full repair)
+
+**Milestone:** The lie is functional. Terminal-trusting player gets punished. Observant player can crack the pattern.
+
+---
+
+### Phase 4 — Manager & AC (Target: ~1h)
+*Goal: Two manager visits, AC mechanic, dialogue system.*
+
+18. Manager visit trigger — timed events, two windows, ±30s randomization
+19. Manager character — simple sprite, walks to AC switch, minimal animation
+20. Dialogue bubble — diegetic text above manager, two lines per visit
+21. AC mechanic — switch ON/OFF state, -8 heat/s while active, 90s timer, visual/audio feedback
+22. Morning briefing screen — full-screen text card, auto-dismiss
+
+**Milestone:** Full session arc is playable. Manager arrives, gives bad advice, turns on AC. Players experience the intended emotional beat.
+
+---
+
+### Phase 5 — Polish & Feel (Target: ~2h)
+*Goal: Audio, visual feedback, screen tint, result screen.*
+
+23. Ambient audio layers — per-station loops, state-driven pitch/presence
+24. One-shot SFX — sparks, AC click, shift bell, package sounds
+25. Temperature screen overlay — warm tint, opacity curve 65–100
+26. Backlog visual — box stack sprite appearing at overwhelmed stations
+27. Win / lose result screens — package count, heat peak, retry button
+28. WebGL build — test, fix obvious issues
+
+**Milestone:** Shippable jam build.
+
+---
+
+### Phase 6 — Buffer (Remaining time)
+*Use only if Phases 1–5 complete early.*
+
+- Screen shake on total shutdown
+- Heat shimmer particle effect above BROKEN stations
+- Package visual variety (box sizes)
+- Manager "not impressed" expression state if temperature is critically high during visit
+
+---
+
+*Document version 1.0 — Jam build scope. Post-jam: spatial heat grid, multiple shifts, mobile controls.*
