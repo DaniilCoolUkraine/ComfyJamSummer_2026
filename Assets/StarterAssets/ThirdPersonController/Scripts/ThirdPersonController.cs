@@ -1,7 +1,6 @@
-﻿ using NarrativeGame;
- using NarrativeGame.Animations.Events;
- using SimpleEventBus.SimpleEventBus.Runtime;
- using UnityEngine;
+﻿using SimpleEventBus.SimpleEventBus.Runtime;
+using TempWorker.Animations.Events;
+using UnityEngine;
 #if ENABLE_INPUT_SYSTEM 
 using UnityEngine.InputSystem;
 #endif

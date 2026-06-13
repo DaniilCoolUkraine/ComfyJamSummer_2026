@@ -1,6 +1,6 @@
 ﻿using UnityEngine;
 
-namespace NarrativeGame
+namespace TempWorker
 {
     public class PlayerController : MonoBehaviour
     {

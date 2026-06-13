@@ -1,8 +1,8 @@
-﻿using NarrativeGame.Animations.Events;
-using SimpleEventBus.SimpleEventBus.Runtime;
+﻿using SimpleEventBus.SimpleEventBus.Runtime;
+using TempWorker.Animations.Events;
 using UnityEngine;
 
-namespace NarrativeGame.Animations
+namespace TempWorker.Animations
 {
     public class AnimatorController : MonoBehaviour
     {

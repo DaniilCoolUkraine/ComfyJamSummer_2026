@@ -3,7 +3,7 @@ using SimpleEventBus.SimpleEventBus.Runtime;
 using StarterAssets;
 using UnityEngine;
 
-namespace NarrativeGame.Interactions.Core.Samples
+namespace TempWorker.Interactions.Core.Impl
 {
     public class RaycastInteractor : MonoBehaviour, IInteractor
     {

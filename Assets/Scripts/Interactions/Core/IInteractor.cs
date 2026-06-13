@@ -1,4 +1,4 @@
-namespace NarrativeGame.Interactions.Core.Samples
+namespace TempWorker.Interactions.Core
 {
     public interface IInteractor
     {

@@ -1,6 +1,6 @@
 using SimpleEventBus.SimpleEventBus.Runtime;
 
-namespace NarrativeGame.Interactions.Core.Samples
+namespace TempWorker.Interactions.Core
 {
     internal class InteractableChangedEvent : IEvent
     {
